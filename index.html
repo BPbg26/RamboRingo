@@ -1,0 +1,1595 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>RAMBO v RINGO</title>
+  <style>
+    html, body { margin:0; height:100%; background:#0b0f1a; overflow:hidden; }
+    canvas { display:block; margin:0 auto; background:#050814; }
+    .hint {
+      position: fixed; left: 12px; bottom: 10px;
+      font: 13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      color: rgba(255,255,255,0.7);
+      user-select:none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hint">Move: WASD/Arrows • Shoot: Space • Restart/Menu: R • Level 3 Pong: Space/Enter to serve</div>
+
+<script>
+(() => {
+  // ---------- Canvas / Scaling ----------
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const W = 960, H = 540;
+
+  function resize() {
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+    canvas.style.width  = (W * scale) + "px";
+    canvas.style.height = (H * scale) + "px";
+    canvas.width  = Math.floor(W * dpr);
+    canvas.height = Math.floor(H * dpr);
+    ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---------- Helpers ----------
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const rand  = (a, b) => a + Math.random() * (b - a);
+  const rectsOverlap = (a, b) =>
+    a.x < b.x + b.w && a.x + a.w > b.x &&
+    a.y < b.y + b.h && a.y + a.h > b.y;
+
+  function circleRectOverlap(cx, cy, r, rect) {
+    const closestX = clamp(cx, rect.x, rect.x + rect.w);
+    const closestY = clamp(cy, rect.y, rect.y + rect.h);
+    const dx = cx - closestX;
+    const dy = cy - closestY;
+    return (dx * dx + dy * dy) <= (r * r);
+  }
+
+  // ---------- Input ----------
+  const keys = new Set();
+  window.addEventListener("keydown", (e) => {
+    if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," ","Enter"].includes(e.key)) e.preventDefault();
+    keys.add(e.key.toLowerCase());
+  });
+  window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+  const down = (k) => keys.has(k);
+
+  function clearKeys() { keys.clear(); }
+  window.addEventListener("blur", clearKeys);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) clearKeys(); });
+
+  window.addEventListener("pointerdown", unlockAudio, { once: true });
+  window.addEventListener("keydown", unlockAudio, { once: true });
+
+  // ---------- Sprite Loading ----------
+  function loadImage(src) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ img, ok: true });
+      img.onerror = () => resolve({ img: null, ok: false });
+      img.src = src;
+    });
+  }
+
+  // ---------- Levels (config) ----------
+  const LEVELS = [
+    {
+      name: "LEVEL 1",
+      mode: "shooter",
+      waveSize: 18,
+      bossHp: 40,
+      enemyShotChance: 0.00,
+      enemyShotCooldown: [99, 99],
+      enemyMoveStyle: "basic",
+      bgKey: "bg1",
+      bossBgKey: "bossBg1",
+      enemyKey: "enemy1",
+      bossKey: "boss1",
+      bossBulletKey: "bossbullet1",
+      waveMusicKey: "music1",
+      bossMusicKey: "bossMusic1",
+    },
+    {
+      name: "LEVEL 2",
+      mode: "shooter",
+      waveSize: 24,
+      bossHp: 60,
+      enemyShotChance: 0.55,
+      enemyShotCooldown: [1.8, 3.4],
+      enemyMoveStyle: "active",
+      bgKey: "bg2",
+      bossBgKey: "bossBg2",
+      enemyKey: "enemy2",
+      bossKey: "boss2",
+      bossBulletKey: "bossbullet2",
+      waveMusicKey: "music2",
+      bossMusicKey: "bossMusic2",
+    },
+    {
+      name: "FINAL BATTLE",
+      mode: "pong",
+      bgKey: "bossBg3",
+      waveMusicKey: "music3",
+      bossMusicKey: "music3",
+    }
+  ];
+
+  // ---------- Assets ----------
+  const assets = {
+    player: { img: null, ok: false },
+    bullet: { img: null, ok: false },
+    start:  { img: null, ok: false },
+
+    // level 1
+    enemy1:      { img: null, ok: false },
+    boss1:       { img: null, ok: false },
+    bossbullet1: { img: null, ok: false },
+    bg1:         { img: null, ok: false },
+    bossBg1:     { img: null, ok: false },
+
+    // level 2
+    enemy2:      { img: null, ok: false },
+    boss2:       { img: null, ok: false },
+    bossbullet2: { img: null, ok: false },
+    bg2:         { img: null, ok: false },
+    bossBg2:     { img: null, ok: false },
+
+    // level 3 pong
+    boss3:       { img: null, ok: false },
+    bossBg3:     { img: null, ok: false },
+    bossbullet3: { img: null, ok: false },
+  };
+
+  // ---------- Audio ----------
+  const sfx = {
+    shoot:     new Audio("assets/shoot.wav"),
+    explode:   new Audio("assets/explode.wav"),
+    hit:       new Audio("assets/hit.wav"),
+    gameover:  new Audio("assets/gameover.wav"),
+    pongHit:   new Audio("assets/pingpongball.wav"),
+  };
+  sfx.shoot.volume = 0.2;
+  sfx.explode.volume = 0.4;
+  sfx.hit.volume = 0.4;
+  sfx.gameover.volume = 0.1;
+  sfx.pongHit.volume = 0.25;
+
+  const startMusic = new Audio("assets/startmusic.mp3");
+  startMusic.loop = true;
+  startMusic.volume = 0.45;
+
+  const music1 = new Audio("assets/music.mp3");
+  music1.loop = true;
+  music1.volume = 0.5;
+
+  const bossMusic1 = new Audio("assets/boss_intro.mp3");
+  bossMusic1.loop = false;
+  bossMusic1.volume = 0.8;
+
+  const music2 = new Audio("assets/music2.wav");
+  music2.loop = true;
+  music2.volume = 0.5;
+
+  const bossMusic2 = new Audio("assets/boss_intro2.mp3");
+  bossMusic2.loop = false;
+  bossMusic2.volume = 0.8;
+
+  const creditsMusic = new Audio("assets/creditsmusic.mp3");
+  creditsMusic.loop = true;
+  creditsMusic.volume = 0.5;
+
+  // Reuse music2 for the final pong battle by default.
+  // Swap this later if you want a dedicated final theme.
+  const music3 = new Audio("assets/boss_intro3.mp3");
+  music3.loop = true;
+  music3.volume = 0.55;
+
+  const waveMusicByKey = {
+    music1,
+    music2,
+    music3,
+  };
+  const bossMusicByKey = {
+    bossMusic1,
+    bossMusic2,
+    music3,
+  };
+
+  let audioUnlocked = false;
+  function unlockAudio() {
+  if (audioUnlocked) return;
+  audioUnlocked = true;
+
+  for (const a of Object.values(sfx)) {
+    try {
+      a.preload = "auto";
+      a.muted = true;
+      a.play().then(() => {
+        a.pause();
+        a.currentTime = 0;
+        a.muted = false;
+      }).catch(() => { a.muted = false; });
+    } catch {}
+  }
+
+  for (const a of [startMusic, creditsMusic, music1, bossMusic1, music2, bossMusic2, music3]) {
+    try { a.preload = "auto"; } catch {}
+  }
+
+  if (state.mode === "menu") {
+    try {
+      startMusic.currentTime = 0;
+      startMusic.play();
+    } catch {}
+  }
+}
+
+  function playSfx(aud) {
+    if (!audioUnlocked) return;
+    try { aud.currentTime = 0; aud.play(); } catch {}
+  }
+
+  function stopAudio(aud) {
+    try { aud.pause(); } catch {}
+    try { aud.currentTime = 0; } catch {}
+  }
+
+  function stopAllMusic() {
+    stopAudio(startMusic);
+    stopAudio(creditsMusic);
+    stopAudio(music1);
+    stopAudio(bossMusic1);
+    stopAudio(music2);
+    stopAudio(bossMusic2);
+    stopAudio(music3);
+  }
+
+  function currentLevel() {
+    return LEVELS[state.levelIndex];
+  }
+
+  function startWaveMusic() {
+    if (!audioUnlocked) return;
+    stopAllMusic();
+    const lvl = currentLevel();
+    const a = waveMusicByKey[lvl.waveMusicKey];
+    if (!a) return;
+    try { a.play(); } catch {}
+  }
+
+  function startBossMusic() {
+    if (!audioUnlocked) return;
+    stopAllMusic();
+    const lvl = currentLevel();
+    const a = bossMusicByKey[lvl.bossMusicKey];
+    if (!a) return;
+    try { a.play(); } catch {}
+  }
+
+  // ---------- Leaderboard ----------
+  const LEADERBOARD_KEY = "rambo_v_ringo_top5";
+
+  function loadTop5() {
+    try {
+      const raw = localStorage.getItem(LEADERBOARD_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter(x => x && typeof x.score === "number" && typeof x.name === "string")
+        .map(x => ({ score: Math.floor(x.score), name: x.name }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+    } catch { return []; }
+  }
+
+  function saveTop5(list) {
+    try { localStorage.setItem(LEADERBOARD_KEY, JSON.stringify(list)); } catch {}
+  }
+
+  let top5 = loadTop5();
+
+  function normaliseName(input) {
+    const name = (input ?? "").toString().trim().toUpperCase();
+    const cleaned = name.replace(/[^A-Z0-9 ]/g, "").slice(0, 12);
+    return cleaned || "PLAYER";
+  }
+
+  function maybeRecordScore(finalScore) {
+    const score = Math.floor(finalScore);
+    const qualifies = top5.length < 5 || score > top5[top5.length - 1].score;
+    if (!qualifies) return;
+
+    const suggested = "KEV";
+    const name = normaliseName(prompt("New Top 5! Enter your name/initials:", suggested));
+
+    top5.push({ score, name });
+    top5.sort((a, b) => b.score - a.score);
+    top5 = top5.slice(0, 5);
+    saveTop5(top5);
+  }
+
+  // ---------- Game State ----------
+  const state = {
+    mode: "loading", // loading | menu | playing | over | victory
+    score: 0,
+    hp: 5,
+    time: 0,
+    spawnTimer: 0,
+    shootCooldown: 0,
+    victoryTimer: 0,
+    victoryScrollY: H + 40,
+    victoryFade: 0,
+
+    levelIndex: 0,
+    levelBannerT: 0,
+
+    // shooter state
+    phase: "wave", // wave | boss | pong
+    waveSize: 18,
+    spawnedThisWave: 0,
+    bossSpawned: false,
+    bossHpMax: 40,
+
+    // background fade
+    activeBg: "wave", // wave | boss | pong
+    prevBg: null,
+    bgFade: 0,
+    bgFadeDuration: 0.5,
+
+    // boss music delay
+    bossIntroTimer: 0,
+    bossMusicPlaying: false,
+
+    // entities
+   stars: [],
+   bullets: [],
+   enemyBullets: [],
+   enemies: [],
+   particles: [],
+   creditParticles: [],
+
+    // pong
+    pong: {
+      playerScore: 0,
+      bossScore: 0,
+      serveTo: "player", // player | boss
+      waitingForServe: true,
+      ball: { x: W / 2, y: H / 2, vx: 0, vy: 0, r: 10 },
+      playerPaddle: { x: 34, y: H / 2 - 55, w: 26, h: 110, speed: 360 },
+      bossPaddle:   { x: W - 60, y: H / 2 - 55, w: 26, h: 110, speed: 300 },
+    }
+  };
+
+  for (let i = 0; i < 140; i++) {
+    state.stars.push({ x: rand(0, W), y: rand(0, H), s: rand(0.5, 2.2), v: rand(20, 120) });
+  }
+
+  const player = {
+    x: 120, y: H/2 - 16,
+    w: 114, h: 114,
+    speed: 320,
+    invuln: 0,
+  };
+
+  function applyLevelSettings() {
+    const lvl = currentLevel();
+    if (lvl.mode === "shooter") {
+      state.waveSize = lvl.waveSize;
+      state.bossHpMax = lvl.bossHp;
+      state.phase = "wave";
+    } else if (lvl.mode === "pong") {
+      state.phase = "pong";
+    }
+  }
+
+  function resetPong() {
+    const p = state.pong;
+    p.playerScore = 0;
+    p.bossScore = 0;
+    p.serveTo = "player";
+    p.waitingForServe = true;
+    p.ball.x = W / 2;
+    p.ball.y = H / 2;
+    p.ball.vx = 0;
+    p.ball.vy = 0;
+    p.ball.r = 14;
+    p.playerPaddle.x = 34;
+    p.playerPaddle.y = H / 2 - p.playerPaddle.h / 2;
+    p.bossPaddle.x = W - 60;
+    p.bossPaddle.y = H / 2 - p.bossPaddle.h / 2;
+  }
+
+  function reset(toMenu = true, opts = { keepScore: false, keepHp: false }) {
+    clearKeys();
+
+    state.mode = toMenu ? "menu" : "playing";
+
+    if (!opts.keepScore) state.score = 0;
+    if (!opts.keepHp) state.hp = 5;
+
+    state.time = 0;
+    state.spawnTimer = 0;
+    state.shootCooldown = 0;
+    state.victoryTimer = 0;
+    state.victoryScrollY = H + 40;
+    state.victoryFade = 0;
+
+    state.spawnedThisWave = 0;
+    state.bossSpawned = false;
+
+    applyLevelSettings();
+
+    state.bossIntroTimer = 0;
+    state.bossMusicPlaying = false;
+
+    state.activeBg = currentLevel().mode === "pong" ? "pong" : "wave";
+    state.prevBg = null;
+    state.bgFade = 0;
+
+    state.bullets.length = 0;
+    state.enemyBullets.length = 0;
+    state.enemies.length = 0;
+    state.particles.length = 0;
+
+    // Credits particles
+    state.creditParticles = [];
+    for (let i = 0; i < 40; i++) {
+    state.creditParticles.push({
+    x: Math.random() * W,
+    y: Math.random() * H,
+    r: 1 + Math.random() * 2,
+    vy: 10 + Math.random() * 20,
+    a: 0.2 + Math.random() * 0.5
+  });
+}
+
+    player.x = 120;
+    player.y = H/2 - player.h/2;
+    player.invuln = 0;
+
+    if (currentLevel().mode === "pong") {
+      resetPong();
+    }
+
+    stopAllMusic();
+
+if (toMenu && audioUnlocked) {
+  try {
+    startMusic.currentTime = 0;
+    startMusic.play();
+  } catch {}
+}
+}
+
+  function start() {
+    unlockAudio();
+    state.levelIndex = 0;
+    state.levelBannerT = 2.0;
+    reset(false, { keepScore: false, keepHp: false });
+    startWaveMusic();
+  }
+
+  function gameOver() {
+    state.mode = "over";
+    stopAllMusic();
+    playSfx(sfx.gameover);
+    maybeRecordScore(state.score);
+    clearKeys();
+  }
+
+function victoryFinal() {
+  state.mode = "victory";
+  state.victoryTimer = 0;
+  state.victoryScrollY = H + 40;
+  state.victoryFade = 0;
+
+  stopAllMusic();
+
+  if (audioUnlocked) {
+    try {
+      creditsMusic.currentTime = 0;
+      creditsMusic.play();
+    } catch {}
+  }
+
+  maybeRecordScore(state.score);
+  clearKeys();
+}
+
+  function advanceToNextLevel() {
+    if (state.levelIndex < LEVELS.length - 1) {
+      state.levelIndex += 1;
+      state.levelBannerT = 2.0;
+
+      const nextMode = currentLevel().mode;
+      if (nextMode === "pong") {
+        reset(false, { keepScore: true, keepHp: false });
+        startWaveMusic();
+      } else {
+        reset(false, { keepScore: true, keepHp: false });
+        startWaveMusic();
+      }
+    } else {
+      victoryFinal();
+    }
+  }
+
+  // ---------- Shooter Entities ----------
+  function spawnEnemy() {
+    const lvl = currentLevel();
+
+    const size = rand(40, 64);
+    const y = rand(30, H - 30 - size);
+
+    const baseSpeed = rand(120, 220) + Math.min(140, state.time * 2);
+    const speedBoost = (state.levelIndex === 1) ? 50 : 0;
+    const speed = baseSpeed + speedBoost;
+
+    const hp = size > 56 ? 2 : 1;
+
+    const style =
+      (lvl.enemyMoveStyle === "active")
+        ? (Math.random() < 0.45 ? "sine" : (Math.random() < 0.65 ? "zigzag" : "straight"))
+        : "straight";
+
+    const canShoot = (Math.random() < lvl.enemyShotChance);
+
+    state.enemies.push({
+      x: W + 30,
+      y,
+      w: size,
+      h: size,
+      vx: -speed,
+      hp,
+      isBoss: false,
+
+      t: 0,
+      style,
+      baseY: y,
+
+      canShoot,
+      fireCooldown: canShoot ? rand(lvl.enemyShotCooldown[0], lvl.enemyShotCooldown[1]) : 999,
+    });
+  }
+
+  function spawnBoss() {
+    const size = 180;
+    state.enemies.push({
+      x: W + 40,
+      y: H / 2 - size / 2,
+      w: size,
+      h: size,
+      vx: -90,
+      hp: state.bossHpMax,
+      isBoss: true,
+      t: 0,
+
+      targetY: rand(40, H - 40 - size),
+      targetX: W - 280,
+      retargetTimer: rand(0.6, 1.2),
+      fireCooldown: 0.6,
+    });
+  }
+
+  function explode(x, y, count = 18) {
+    for (let i = 0; i < count; i++) {
+      state.particles.push({
+        x, y,
+        vx: rand(-220, 220),
+        vy: rand(-220, 220),
+        life: rand(0.25, 0.6),
+        t: 0,
+      });
+    }
+  }
+
+  function shoot() {
+    const bulletW = 36, bulletH = 12;
+    state.bullets.push({
+      x: player.x + player.w - 6,
+      y: player.y + player.h/2 - bulletH/2,
+      w: bulletW,
+      h: bulletH,
+      vx: 720,
+    });
+
+    playSfx(sfx.shoot);
+
+    for (let i = 0; i < 6; i++) {
+      state.particles.push({
+        x: player.x + player.w,
+        y: player.y + player.h/2,
+        vx: rand(80, 260),
+        vy: rand(-80, 80),
+        life: rand(0.12, 0.22),
+        t: 0,
+      });
+    }
+  }
+
+  function bossShoot(boss) {
+    const sx = boss.x;
+    const sy = boss.y + boss.h / 2;
+
+    const px = player.x + player.w / 2;
+    const py = player.y + player.h / 2;
+
+    const dx = px - sx;
+    const dy = py - sy;
+    const len = Math.max(1, Math.hypot(dx, dy));
+
+    const speed = (state.levelIndex === 1) ? 260 : 280;
+    const vx = (dx / len) * speed;
+    const vy = (dy / len) * speed;
+
+    const size = (state.levelIndex === 1) ? 40 : 28;
+
+    state.enemyBullets.push({
+      x: sx - size / 2,
+      y: sy - size / 2,
+      w: size,
+      h: size,
+      vx, vy,
+      fromBoss: true,
+    });
+  }
+
+  function enemyShoot(e) {
+    const size = 18;
+    const speed = 320;
+
+    state.enemyBullets.push({
+      x: e.x - size / 2,
+      y: (e.y + e.h / 2) - size / 2,
+      w: size,
+      h: size,
+      vx: -speed,
+      vy: 0,
+      fromBoss: false,
+    });
+  }
+
+  // ---------- Pong ----------
+  function pongHasWinner() {
+    const p = state.pong;
+    if (p.playerScore < 11 && p.bossScore < 11) return false;
+    return Math.abs(p.playerScore - p.bossScore) >= 2;
+  }
+
+  function startPongServe() {
+    const p = state.pong;
+    if (!p.waitingForServe) return;
+
+    const dir = (p.serveTo === "player") ? 1 : -1;
+    const speedX = rand(270, 340) * dir;
+    const speedY = rand(-180, 180);
+
+    p.ball.x = W / 2;
+    p.ball.y = H / 2;
+    p.ball.vx = speedX;
+    p.ball.vy = speedY;
+    p.waitingForServe = false;
+  }
+
+  function scorePongPoint(winner) {
+    const p = state.pong;
+
+    if (winner === "player") {
+      p.playerScore += 1;
+      state.score += 200;
+      p.serveTo = "boss";
+    } else {
+      p.bossScore += 1;
+      p.serveTo = "player";
+    }
+
+    if (pongHasWinner()) {
+      if (p.playerScore > p.bossScore) {
+        victoryFinal();
+      } else {
+        gameOver();
+      }
+      return;
+    }
+
+    p.ball.x = W / 2;
+    p.ball.y = H / 2;
+    p.ball.vx = 0;
+    p.ball.vy = 0;
+    p.waitingForServe = true;
+  }
+
+  function updatePong(dt) {
+    const p = state.pong;
+
+  // Player paddle movement (Level 1/2 style: up/down + forward/back)
+  const mx = (down("arrowright") || down("d") ? 1 : 0) - (down("arrowleft") || down("a") ? 1 : 0);
+  const my = (down("arrowdown") || down("s") ? 1 : 0) - (down("arrowup") || down("w") ? 1 : 0);
+
+  p.playerPaddle.x = clamp(
+  p.playerPaddle.x + mx * p.playerPaddle.speed * dt,
+  20,
+  260
+  );
+
+  p.playerPaddle.y = clamp(
+  p.playerPaddle.y + my * p.playerPaddle.speed * dt,
+  20,
+  H - 20 - p.playerPaddle.h
+  );
+
+    // Boss paddle AI
+    const targetY = p.ball.y - (p.bossPaddle.h / 2);
+    const aiSpeed = 285;
+    if (!p.waitingForServe) {
+      if (p.bossPaddle.y + p.bossPaddle.h / 2 < p.ball.y - 8) {
+        p.bossPaddle.y += aiSpeed * dt;
+      } else if (p.bossPaddle.y + p.bossPaddle.h / 2 > p.ball.y + 8) {
+        p.bossPaddle.y -= aiSpeed * dt;
+      }
+    } else {
+      // drift back to centre between serves
+      if (p.bossPaddle.y < H / 2 - p.bossPaddle.h / 2 - 4) p.bossPaddle.y += aiSpeed * dt * 0.5;
+      if (p.bossPaddle.y > H / 2 - p.bossPaddle.h / 2 + 4) p.bossPaddle.y -= aiSpeed * dt * 0.5;
+    }
+    p.bossPaddle.y = clamp(p.bossPaddle.y, 20, H - 20 - p.bossPaddle.h);
+
+    // Serve
+    if (p.waitingForServe) {
+      if (down(" ") || down("enter")) startPongServe();
+      return;
+    }
+
+    // Ball movement
+    p.ball.x += p.ball.vx * dt;
+    p.ball.y += p.ball.vy * dt;
+
+    // Top/bottom bounce
+    if (p.ball.y - p.ball.r <= 0) {
+      p.ball.y = p.ball.r;
+      p.ball.vy *= -1;
+      playSfx(sfx.pongHit);
+    } else if (p.ball.y + p.ball.r >= H) {
+      p.ball.y = H - p.ball.r;
+      p.ball.vy *= -1;
+      playSfx(sfx.pongHit);
+    }
+
+    // Player paddle collision
+    const leftRect = p.playerPaddle;
+    if (p.ball.vx < 0 && circleRectOverlap(p.ball.x, p.ball.y, p.ball.r, leftRect)) {
+      p.ball.x = leftRect.x + leftRect.w + p.ball.r;
+      const rel = (p.ball.y - (leftRect.y + leftRect.h / 2)) / (leftRect.h / 2);
+      p.ball.vx = Math.abs(p.ball.vx) * 1.04;
+      p.ball.vy = clamp(p.ball.vy + rel * 120, -360, 360);
+      playSfx(sfx.pongHit);
+    }
+
+    // Boss paddle collision
+    const rightRect = p.bossPaddle;
+    if (p.ball.vx > 0 && circleRectOverlap(p.ball.x, p.ball.y, p.ball.r, rightRect)) {
+      p.ball.x = rightRect.x - p.ball.r;
+      const rel = (p.ball.y - (rightRect.y + rightRect.h / 2)) / (rightRect.h / 2);
+      p.ball.vx = -Math.abs(p.ball.vx) * 1.04;
+      p.ball.vy = clamp(p.ball.vy + rel * 120, -360, 360);
+      playSfx(sfx.pongHit);
+    }
+
+    // Scoring
+    if (p.ball.x + p.ball.r < 0) {
+      scorePongPoint("boss");
+      return;
+    }
+    if (p.ball.x - p.ball.r > W) {
+      scorePongPoint("player");
+      return;
+    }
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    state.time += dt;
+    state.levelBannerT = Math.max(0, state.levelBannerT - dt);
+
+    if (state.prevBg) {
+      state.bgFade += dt / state.bgFadeDuration;
+      if (state.bgFade >= 1) {
+        state.bgFade = 1;
+        state.prevBg = null;
+      }
+    }
+
+    if (down("r") && state.mode !== "loading") {
+      reset(true, { keepScore: false, keepHp: false });
+      return;
+    }
+
+if (state.mode === "victory") {
+  state.victoryTimer += dt;
+
+  // Fade the win scene out between 2s and 4s
+  if (state.victoryTimer >= 2.0 && state.victoryTimer <= 4.0) {
+    state.victoryFade = (state.victoryTimer - 2.0) / 2.0;
+  } else if (state.victoryTimer > 4.0) {
+    state.victoryFade = 1;
+    state.victoryScrollY -= 34 * dt;
+  }
+
+  // Move credits particles
+  for (const p of state.creditParticles) {
+  p.y -= p.vy * dt;
+  if (p.y < -5) {
+    p.y = H + 5;
+    p.x = Math.random() * W;
+  }
+}
+
+  return;
+}
+
+    if (state.mode === "loading") return;
+
+if (state.mode === "menu") {
+
+  // Normal start
+  if (down(" ") || down("enter")) {
+    start();
+    return;
+  }
+
+  // Debug: jump straight to Level 1
+  if (down("1")) {
+    unlockAudio();
+    state.levelIndex = 0;
+    state.levelBannerT = 1.0;
+    reset(false, { keepScore: false, keepHp: false });
+    startWaveMusic();
+    return;
+  }
+
+  // Debug: jump straight to Level 2
+  if (down("2")) {
+    unlockAudio();
+    state.levelIndex = 1;
+    state.levelBannerT = 1.0;
+    reset(false, { keepScore: false, keepHp: false });
+    startWaveMusic();
+    return;
+  }
+
+  // Debug: jump straight to Level 3
+  if (down("3")) {
+    unlockAudio();
+    state.levelIndex = 2;
+    state.levelBannerT = 1.0;
+    reset(false, { keepScore: false, keepHp: false });
+    startWaveMusic();
+    return;
+  }
+
+// Debug: jump straight to Victory / End Credits
+if (down("4")) {
+  unlockAudio();
+  state.score = 0;
+  state.mode = "victory";
+  state.victoryTimer = 0;
+  state.victoryScrollY = H + 40;
+  state.victoryFade = 0;
+  stopAllMusic();
+
+  if (audioUnlocked) {
+    try {
+      creditsMusic.currentTime = 0;
+      creditsMusic.play();
+    } catch {}
+  }
+
+  clearKeys();
+  return;
+}
+
+  return;
+}
+
+    if (state.mode === "over") {
+      if (down(" ") || down("enter")) start();
+      return;
+    }
+
+    // Level 3 Pong mode
+    if (currentLevel().mode === "pong") {
+      updatePong(dt);
+      return;
+    }
+
+    // starfield fallback motion
+    for (const st of state.stars) {
+      st.x -= st.v * dt;
+      if (st.x < -10) {
+        st.x = W + 10;
+        st.y = rand(0, H);
+        st.s = rand(0.5, 2.2);
+        st.v = rand(20, 120);
+      }
+    }
+
+    // player movement
+    const mx = (down("arrowright") || down("d") ? 1 : 0) - (down("arrowleft") || down("a") ? 1 : 0);
+    const my = (down("arrowdown")  || down("s") ? 1 : 0) - (down("arrowup")   || down("w") ? 1 : 0);
+
+    player.x = clamp(player.x + mx * player.speed * dt, 20, W - 80);
+    player.y = clamp(player.y + my * player.speed * dt, 20, H - 20 - player.h);
+    player.invuln = Math.max(0, player.invuln - dt);
+
+    // shooting
+    state.shootCooldown = Math.max(0, state.shootCooldown - dt);
+    if (down(" ") && state.shootCooldown === 0) {
+      shoot();
+      state.shootCooldown = 0.25;
+    }
+
+    // Wave / Boss flow
+    if (state.phase === "wave") {
+      if (state.spawnedThisWave < state.waveSize) {
+        const minGap = 0.32, maxGap = 0.85;
+        const difficulty = clamp(state.time / 45, 0, 1);
+        const gap = maxGap - (maxGap - minGap) * difficulty;
+
+        state.spawnTimer -= dt;
+        if (state.spawnTimer <= 0) {
+          spawnEnemy();
+          state.spawnedThisWave += 1;
+          state.spawnTimer = gap + rand(-0.08, 0.08);
+        }
+      } else {
+        if (state.enemies.length === 0) {
+          state.phase = "boss";
+          state.bossSpawned = false;
+
+          if (!state.bossMusicPlaying) {
+            state.bossMusicPlaying = true;
+            startBossMusic();
+            state.bossIntroTimer = 12.0;
+
+            state.prevBg = state.activeBg;
+            state.activeBg = "boss";
+            state.bgFade = 0;
+          }
+        }
+      }
+    }
+
+    if (state.phase === "boss") {
+      if (state.bossIntroTimer > 0) {
+        state.bossIntroTimer -= dt;
+        if (state.bossIntroTimer < 0) state.bossIntroTimer = 0;
+      } else {
+        const bossAlive = state.enemies.some(en => en.isBoss);
+        if (!bossAlive) state.bossSpawned = false;
+
+        if (!state.bossSpawned) {
+          spawnBoss();
+          state.bossSpawned = true;
+        }
+      }
+    }
+
+    // Player bullets
+    for (let i = state.bullets.length - 1; i >= 0; i--) {
+      const b = state.bullets[i];
+      b.x += b.vx * dt;
+      if (b.x > W + 60) state.bullets.splice(i, 1);
+    }
+
+    // Enemy bullets
+    for (let i = state.enemyBullets.length - 1; i >= 0; i--) {
+      const eb = state.enemyBullets[i];
+      eb.x += eb.vx * dt;
+      eb.y += eb.vy * dt;
+      if (eb.x < -60 || eb.x > W + 60 || eb.y < -60 || eb.y > H + 60) {
+        state.enemyBullets.splice(i, 1);
+      }
+    }
+
+    // Enemy bullets vs player
+    const pBox = { x: player.x, y: player.y, w: player.w, h: player.h };
+    for (let i = state.enemyBullets.length - 1; i >= 0; i--) {
+      const eb = state.enemyBullets[i];
+      const bBox = { x: eb.x, y: eb.y, w: eb.w, h: eb.h };
+
+      if (rectsOverlap(pBox, bBox) && player.invuln === 0) {
+        state.enemyBullets.splice(i, 1);
+        explode(player.x + player.w/2, player.y + player.h/2, 24);
+        playSfx(sfx.hit);
+        state.hp -= 1;
+        player.invuln = 1.0;
+        if (state.hp <= 0) gameOver();
+      }
+    }
+
+    // Enemies movement + shooting
+    for (let i = state.enemies.length - 1; i >= 0; i--) {
+      const e = state.enemies[i];
+
+      if (e.isBoss) {
+        e.t += dt;
+
+        e.x += e.vx * dt;
+        const enterX = W - 280;
+
+        if (e.vx !== 0 && e.x <= enterX) {
+          e.x = enterX;
+          e.vx = 0;
+          e.targetX = enterX;
+        }
+
+        if (e.vx === 0) {
+          e.fireCooldown -= dt;
+          if (e.fireCooldown <= 0) {
+            bossShoot(e);
+            e.fireCooldown = rand(0.6, 1.1);
+          }
+        }
+
+        e.retargetTimer -= dt;
+        if (e.retargetTimer <= 0) {
+          e.targetY = rand(40, H - 40 - e.h);
+          e.targetX = rand(320, W - 220);
+          e.retargetTimer = rand(0.5, 1.1);
+        }
+
+        const dy = e.targetY - e.y;
+        e.y += dy * Math.min(1, dt * 6.5);
+        const dx = e.targetX - e.x;
+        e.x += dx * Math.min(1, dt * 4.5);
+
+        e.y += Math.sin(e.t * 13) * 10 * dt;
+        e.y = clamp(e.y, 30, H - 30 - e.h);
+        e.x = clamp(e.x, 220, W - 40 - e.w);
+
+      } else {
+        e.t += dt;
+        e.x += e.vx * dt;
+
+        if (e.style === "sine") {
+          e.y = e.baseY + Math.sin(e.t * 4.0) * 28;
+        } else if (e.style === "zigzag") {
+          e.y += Math.sin(e.t * 7.0) * 90 * dt;
+        }
+        e.y = clamp(e.y, 20, H - 20 - e.h);
+
+        if (e.canShoot && e.x < W - 120) {
+          e.fireCooldown -= dt;
+          if (e.fireCooldown <= 0) {
+            enemyShoot(e);
+            const lvl = currentLevel();
+            e.fireCooldown = rand(lvl.enemyShotCooldown[0], lvl.enemyShotCooldown[1]);
+          }
+        }
+
+        if (e.x + e.w < -60) {
+          state.enemies.splice(i, 1);
+          state.score = Math.max(0, state.score - 10);
+        }
+      }
+    }
+
+    // Player bullets vs enemies
+    for (let bi = state.bullets.length - 1; bi >= 0; bi--) {
+      const b = state.bullets[bi];
+      let hit = false;
+
+      for (let ei = state.enemies.length - 1; ei >= 0; ei--) {
+        const e = state.enemies[ei];
+
+        if (rectsOverlap(b, e)) {
+          hit = true;
+          e.hp -= 1;
+          explode(b.x, b.y, 8);
+
+          if (e.hp <= 0) {
+            explode(e.x + e.w/2, e.y + e.h/2, e.isBoss ? 60 : 24);
+            playSfx(sfx.explode);
+
+            if (e.isBoss) {
+              state.score += 500;
+              state.enemies.splice(ei, 1);
+              advanceToNextLevel();
+            } else {
+              state.score += 50;
+              state.enemies.splice(ei, 1);
+            }
+          } else {
+            state.score += 15;
+          }
+          break;
+        }
+      }
+
+      if (hit) state.bullets.splice(bi, 1);
+    }
+
+    // Enemy vs player collisions
+    for (let ei = state.enemies.length - 1; ei >= 0; ei--) {
+      const e = state.enemies[ei];
+      if (rectsOverlap(pBox, e) && player.invuln === 0) {
+        if (!e.isBoss) state.enemies.splice(ei, 1);
+        explode(player.x + player.w/2, player.y + player.h/2, 32);
+        playSfx(sfx.hit);
+        state.hp -= 1;
+        player.invuln = 1.0;
+        if (state.hp <= 0) gameOver();
+      }
+    }
+
+    // Particles
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      const p = state.particles[i];
+      p.t += dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= (1 - 2.2 * dt);
+      p.vy *= (1 - 2.2 * dt);
+      if (p.t >= p.life) state.particles.splice(i, 1);
+    }
+  }
+
+  // ---------- Render ----------
+  function drawSpriteOrFallback(ok, img, x, y, w, h, fallbackFn) {
+    if (ok && img) ctx.drawImage(img, x, y, w, h);
+    else fallbackFn();
+  }
+
+  function getBgAssetFor(levelIdx, which) {
+    const lvl = LEVELS[levelIdx];
+    if (lvl.mode === "pong") return assets[lvl.bgKey] || { ok:false, img:null };
+    const key = (which === "boss") ? lvl.bossBgKey : lvl.bgKey;
+    return assets[key] || { ok:false, img:null };
+  }
+
+  function getEnemyAssetFor(levelIdx) {
+    const lvl = LEVELS[levelIdx];
+    return assets[lvl.enemyKey] || { ok:false, img:null };
+  }
+
+  function getBossAssetFor(levelIdx) {
+    const lvl = LEVELS[levelIdx];
+    return assets[lvl.bossKey] || { ok:false, img:null };
+  }
+
+  function getBossBulletAssetFor(levelIdx) {
+    const lvl = LEVELS[levelIdx];
+    return assets[lvl.bossBulletKey] || { ok:false, img:null };
+  }
+
+  function renderPong() {
+    const p = state.pong;
+
+    // centre line
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.lineWidth = 4;
+    ctx.setLineDash([12, 10]);
+    ctx.beginPath();
+    ctx.moveTo(W / 2, 0);
+    ctx.lineTo(W / 2, H);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // top scores
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.font = "bold 38px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.textAlign = "center";
+    ctx.fillText(`${p.playerScore}`, W / 2 - 90, 56);
+    ctx.fillText(`${p.bossScore}`, W / 2 + 90, 56);
+
+    ctx.font = "18px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.fillText("FIRST TO 11 • WIN BY 2", W / 2, 86);
+
+    // player paddle
+    drawSpriteOrFallback(
+    assets.player.ok, assets.player.img,
+    p.playerPaddle.x - 44,
+    p.playerPaddle.y + (p.playerPaddle.h / 2) - (player.h / 2),
+    player.w,
+    player.h,
+    () => {
+    ctx.fillStyle = "rgba(120,220,255,0.95)";
+    ctx.fillRect(p.playerPaddle.x, p.playerPaddle.y, p.playerPaddle.w, p.playerPaddle.h);
+  }
+);
+
+    // boss paddle
+    drawSpriteOrFallback(
+      assets.boss3.ok, assets.boss3.img,
+      p.bossPaddle.x - 18, p.bossPaddle.y - 8, 64, p.bossPaddle.h + 16,
+      () => {
+        ctx.fillStyle = "rgba(220,80,80,0.95)";
+        ctx.fillRect(p.bossPaddle.x, p.bossPaddle.y, p.bossPaddle.w, p.bossPaddle.h);
+      }
+    );
+
+    // ball
+       drawSpriteOrFallback(
+       assets.bossbullet3.ok,
+       assets.bossbullet3.img,
+       p.ball.x - p.ball.r,
+       p.ball.y - p.ball.r,
+       p.ball.r * 2,
+       p.ball.r * 2,
+       () => {
+       ctx.fillStyle = "rgba(255,245,180,1)";
+       ctx.beginPath();
+       ctx.arc(p.ball.x, p.ball.y, p.ball.r, 0, Math.PI * 2);
+       ctx.fill();
+  }
+);
+
+    if (p.waitingForServe && state.mode === "playing") {
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.font = "bold 32px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("PRESS SPACE OR ENTER TO SERVE", W / 2, H / 2 - 10);
+
+      ctx.font = "18px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillStyle = "rgba(255,255,255,0.8)";
+      ctx.fillText(`Serve: ${p.serveTo.toUpperCase()}`, W / 2, H / 2 + 24);
+    }
+
+    ctx.textAlign = "left";
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, W, H);
+
+    // background
+    const currentBgAsset = getBgAssetFor(state.levelIndex, state.activeBg);
+    const previousBgAsset = state.prevBg ? getBgAssetFor(state.levelIndex, state.prevBg) : null;
+
+    if (previousBgAsset && state.bgFade < 1) {
+      ctx.globalAlpha = 1 - state.bgFade;
+      if (previousBgAsset.ok && previousBgAsset.img) {
+        ctx.drawImage(previousBgAsset.img, 0, 0, W, H);
+      } else {
+        ctx.fillStyle = "rgba(255,255,255,0.9)";
+        for (const st of state.stars) {
+          ctx.globalAlpha = clamp(st.s / 2.2, 0.2, 1) * (1 - state.bgFade);
+          ctx.fillRect(st.x, st.y, st.s, st.s);
+        }
+      }
+    }
+
+    ctx.globalAlpha = state.prevBg ? state.bgFade : 1;
+
+    if (currentBgAsset.ok && currentBgAsset.img) {
+      ctx.drawImage(currentBgAsset.img, 0, 0, W, H);
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      for (const st of state.stars) {
+        ctx.globalAlpha = clamp(st.s / 2.2, 0.2, 1);
+        ctx.fillRect(st.x, st.y, st.s, st.s);
+      }
+    }
+
+    ctx.globalAlpha = 1;
+
+if (state.mode === "victory") {
+  const t = state.victoryTimer;
+  const fade = clamp(state.victoryFade, 0, 1);
+
+  // ----- Stage 1: win scene -----
+  if (fade < 1) {
+    if (assets.bossBg3.ok && assets.bossBg3.img) {
+      ctx.drawImage(assets.bossBg3.img, 0, 0, W, H);
+    } else {
+      ctx.fillStyle = "#050814";
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // Character images / win scene
+    ctx.save();
+    ctx.globalAlpha = 1 - fade;
+
+    if (assets.player.ok && assets.player.img) {
+      ctx.drawImage(assets.player.img, 120, 170, 180, 180);
+    }
+
+    if (assets.boss3.ok && assets.boss3.img) {
+      ctx.translate(720, 310);
+      ctx.rotate(-0.35);
+      ctx.drawImage(assets.boss3.img, -90, -90, 180, 180);
+      ctx.rotate(0.35);
+      ctx.translate(-720, -310);
+    }
+
+    ctx.fillStyle = `rgba(255,255,255,${0.96 * (1 - fade)})`;
+    ctx.textAlign = "center";
+    ctx.font = "bold 56px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.fillText("YOU WIN!", W / 2, 90);
+
+    ctx.font = "22px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.fillText(`Final Score: ${Math.floor(state.score)}`, W / 2, 125);
+
+    ctx.font = "18px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.fillStyle = `rgba(255,255,255,${0.78 * (1 - fade)})`;
+    ctx.fillText("Ringo Starr has been defeated at ping pong! The universe is safe!", W / 2, 155);
+
+    ctx.restore();
+  }
+
+  // ----- Fade to black -----
+  ctx.fillStyle = `rgba(0,0,0,${Math.max(0.45, fade)})`;
+  ctx.fillRect(0, 0, W, H);
+
+  // ----- Stage 2: credits on black -----
+    if (fade >= 1) {
+    const y = state.victoryScrollY;
+
+    for (const p of state.creditParticles) {
+    if (p.y < H - 56) {
+    ctx.fillStyle = `rgba(255,60,60,${p.a})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fill();
+    }
+  }
+
+    ctx.textAlign = "center";
+
+    ctx.fillStyle = "rgba(255,60,60,0.95)";
+    ctx.font = "bold 26px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.fillText("CREDITS", W / 2, y);
+
+    ctx.font = "20px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.fillStyle = "rgba(255,60,60,0.95)";
+    ctx.fillText("Created in 2026 by Kev @ BEST PROMOS | best games", W / 2, y + 46);
+    ctx.fillText("RAMBO v RINGO: The Ultimate Battle", W / 2, y + 86);
+    ctx.fillText("Built with love, guns and drums in RUISLIP", W / 2, y + 126); 
+
+    ctx.font = "18px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.fillStyle = "rgba(255,60,60,0.95)";
+    ctx.fillText("RAMBO v RINGO II: This Time It's Personal will be out in Spring 2029", W / 2, y + 182);
+    ctx.fillText("Thanks for playing. You 100% absolutely smashed it, gorgeous. Don't forget to keep playing it, hun.", W / 2, y + 382);
+    ctx.fillText("The End...or is it...?", W / 2, y + 500);
+    ctx.fillText("Yes, this is the end.", W / 2, y + 800);
+    ctx.fillText("Or is it???", W / 2, y + 1800);
+
+  }
+
+  // Restart prompt
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.fillRect(0, H - 56, W, 56);
+
+  ctx.textAlign = "center";
+  ctx.font = "18px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  ctx.fillText("Press R to return to menu", W / 2, H - 22);
+
+  ctx.textAlign = "left";
+  return;
+}
+
+    // loading/menu/over
+    if (state.mode === "loading") {
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.font = "16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillText("Loading...", W/2 - 40, H/2);
+      return;
+    }
+   if (state.mode === "menu") {
+
+  if (assets.start.ok && assets.start.img) {
+    ctx.drawImage(assets.start.img, 0, 0, W, H);
+  }
+
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.fillRect(0, H - 90, W, 90);
+
+  ctx.fillStyle = "white";
+  ctx.font = "bold 24px system-ui, Arial";
+  ctx.textAlign = "center";
+
+  ctx.font = "16px system-ui, Arial";
+
+  ctx.textAlign = "left";
+  return;
+}
+    if (state.mode === "over") {
+      ctx.fillStyle = "rgba(0,0,0,0.65)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.font = "bold 56px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("GAME OVER", W/2, H/2 - 20);
+      ctx.font = "20px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillText("Press Space / Enter to restart", W/2, H/2 + 25);
+      ctx.textAlign = "left";
+      return;
+    }
+
+    // Level 3 Pong render
+    if (currentLevel().mode === "pong") {
+      renderPong();
+      return;
+    }
+
+    // Shooter HUD
+    ctx.fillStyle = "rgba(220,40,40,0.9)";
+    ctx.font = "16px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+    ctx.textAlign = "left";
+    ctx.fillText(`Score: ${Math.floor(state.score)}`, 16, 26);
+    ctx.fillText(`HP: ${state.hp}`, 16, 48);
+
+    const best = top5.length ? top5[0].score : 0;
+    ctx.fillText(`Best: ${best}`, 16, 70);
+
+    const boss = state.enemies.find(e => e.isBoss);
+    if (boss) ctx.fillText(`Boss HP: ${boss.hp}`, 16, 114);
+
+    if (state.levelBannerT > 0) {
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.font = "bold 46px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.textAlign = "center";
+      ctx.fillText(currentLevel().name, W/2, H/2 - 10);
+
+      ctx.font = "18px system-ui, -apple-system, Segoe UI, Roboto, Arial";
+      ctx.fillStyle = "rgba(255,255,255,0.75)";
+      ctx.fillText("Get ready...", W/2, H/2 + 25);
+
+      ctx.textAlign = "left";
+    }
+
+    // player
+    const blink = player.invuln > 0 && Math.floor(player.invuln * 10) % 2 === 0;
+    if (!blink) {
+      drawSpriteOrFallback(
+        assets.player.ok, assets.player.img,
+        player.x, player.y, player.w, player.h,
+        () => {
+          ctx.fillStyle = "rgba(120,220,255,0.95)";
+          ctx.fillRect(player.x, player.y + 10, player.w - 8, player.h - 20);
+        }
+      );
+    }
+
+    // player bullets
+    for (const b of state.bullets) {
+      drawSpriteOrFallback(
+        assets.bullet.ok, assets.bullet.img,
+        b.x, b.y, b.w, b.h,
+        () => { ctx.fillStyle = "rgba(40,160,40,1)"; ctx.fillRect(b.x, b.y, b.w, b.h); }
+      );
+    }
+
+    // enemy + boss bullets
+    const bulletSpr = getBossBulletAssetFor(state.levelIndex);
+    for (const eb of state.enemyBullets) {
+      drawSpriteOrFallback(
+        bulletSpr.ok, bulletSpr.img,
+        eb.x, eb.y, eb.w, eb.h,
+        () => { ctx.fillStyle = "rgba(255,140,40,0.95)"; ctx.fillRect(eb.x, eb.y, eb.w, eb.h); }
+      );
+    }
+
+    // enemies
+    const enemySpr = getEnemyAssetFor(state.levelIndex);
+    const bossSpr  = getBossAssetFor(state.levelIndex);
+
+    for (const e of state.enemies) {
+      const spr = e.isBoss ? bossSpr : enemySpr;
+      drawSpriteOrFallback(
+        spr.ok, spr.img,
+        e.x, e.y, e.w, e.h,
+        () => {
+          ctx.fillStyle = e.isBoss ? "rgba(200,40,40,0.95)" : "rgba(255,140,160,0.95)";
+          ctx.fillRect(e.x, e.y, e.w, e.h);
+        }
+      );
+    }
+
+    // particles
+    ctx.fillStyle = "rgba(160,20,20,1)";
+    for (const p of state.particles) {
+      const a = 1 - (p.t / p.life);
+      ctx.globalAlpha = clamp(a, 0, 1);
+      ctx.fillRect(p.x, p.y, 3, 3);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // ---------- Main Loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    update(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- Boot ----------
+  (async () => {
+    state.mode = "loading";
+
+    const [
+      playerImg, bulletImg, startImg,
+
+      enemy1, boss1, bossbullet1, bg1, bossBg1,
+      enemy2, boss2, bossbullet2, bg2, bossBg2,
+      boss3, bg3, bossbullet3
+    ] = await Promise.all([
+      loadImage("assets/player.png"),
+      loadImage("assets/bullet.png"),
+      loadImage("assets/start.png"),
+
+      loadImage("assets/enemy.png"),
+      loadImage("assets/boss.png"),
+      loadImage("assets/bossbullet.png"),
+      loadImage("assets/bg.png"),
+      loadImage("assets/boss_bg.png"),
+
+      loadImage("assets/enemy2.png"),
+      loadImage("assets/boss2.png"),
+      loadImage("assets/bossbullet2.png"),
+      loadImage("assets/bg2.png"),
+      loadImage("assets/boss_bg2.png"),
+
+      loadImage("assets/boss3.png"),
+      loadImage("assets/boss_bg3.png"),
+      loadImage("assets/bossbullet3.png"),
+    ]);
+
+    assets.player = playerImg;
+    assets.bullet = bulletImg;
+    assets.start  = startImg;
+
+    assets.enemy1 = enemy1;
+    assets.boss1 = boss1;
+    assets.bossbullet1 = bossbullet1;
+    assets.bg1 = bg1;
+    assets.bossBg1 = bossBg1;
+
+    assets.enemy2 = enemy2;
+    assets.boss2 = boss2;
+    assets.bossbullet2 = bossbullet2;
+    assets.bg2 = bg2;
+    assets.bossBg2 = bossBg2;
+
+    assets.boss3 = boss3;
+    assets.bossBg3 = bg3;
+    assets.bossbullet3 = bossbullet3;
+
+    state.levelIndex = 0;
+    applyLevelSettings();
+    reset(true, { keepScore: false, keepHp: false });
+
+    // Try autoplay menu music
+    try {
+    startMusic.currentTime = 0;
+    startMusic.play().then(() => {
+    audioUnlocked = true;
+    }).catch(() => {});
+    } catch {}
+
+    requestAnimationFrame(frame);
+  })();
+})();
+</script>
+</body>
+</html>
