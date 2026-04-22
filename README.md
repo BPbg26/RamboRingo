@@ -24,8 +24,6 @@ A retro browser action game with three levels, bosses, music, and a final ping p
 <img width="1610" height="904" alt="screenshot2" src="https://github.com/user-attachments/assets/2d002e28-c6e5-46e8-b462-eb52ae2cccc8" />
 <img width="1619" height="908" alt="screenshot3" src="https://github.com/user-attachments/assets/5c389bcb-464f-46d5-8d7f-627c345b5bba" />
 
-
-
 ## Credits
 Created by Kev
 Built with love, guns and drums in RUISLIP
